@@ -1,6 +1,7 @@
 using System.IO;
 using System.IO.Compression;
 using System.Net.Http;
+using System.Windows;
 using GitHubDesktopZh.Core.Models;
 using GitHubDesktopZh.Core.Services;
 using SharpCompress.Archives;
@@ -46,6 +47,8 @@ public class MainViewModel : ViewModelBase
     private string _progressText = string.Empty;
     private readonly System.Text.StringBuilder _logBuffer = new();
 
+    private readonly SemaphoreSlim _operationLock = new(1, 1);
+
     private const string DefaultIndexUrl = @"https://raw.githubusercontent.com/743859910/GitHub_Desktop_Simplified_Chinese/master/resources/index.json
 https://raw.githubusercontent.com/cngege/GitHubDesktop2Chinese/main/json/localization.json
 https://raw.githubusercontent.com/zetaloop/desktop/l10n/resources/index.json
@@ -63,16 +66,17 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             Path.Combine(_dataDirectory, "cache", "index.json"),
             Path.Combine(appDirectory, "resources", "index.json"));
         _downloadService = new DownloadService();
-        _backupManager = new BackupManager(_dataDirectory);
+        _backupManager = new BackupManager(_dataDirectory, _logger);
         _stateManager = new StateManager(Path.Combine(_dataDirectory, "state.json"));
         _settingsManager = new SettingsManager(Path.Combine(_dataDirectory, "settings.json"));
         _logger = new Logger(Path.Combine(_dataDirectory, "logs"));
+        _backupManager = new BackupManager(_dataDirectory, _logger);
 
-        CheckForUpdatesCommand = new RelayCommand(async () => await CheckForUpdatesAsync());
-        LocalizeCommand = new RelayCommand(async () => await LocalizeAsync());
-        RestoreCommand = new RelayCommand(async () => await RestoreAsync());
-        DownloadLatestCommand = new RelayCommand(async () => await DownloadLatestPatchAsync());
-        CheckAppUpdatesCommand = new RelayCommand(async () => await CheckAppUpdatesAsync());
+        CheckForUpdatesCommand = new AsyncRelayCommand(CheckForUpdatesAsync);
+        LocalizeCommand = new AsyncRelayCommand(LocalizeAsync);
+        RestoreCommand = new AsyncRelayCommand(RestoreAsync);
+        DownloadLatestCommand = new AsyncRelayCommand(DownloadLatestPatchAsync);
+        CheckAppUpdatesCommand = new AsyncRelayCommand(CheckAppUpdatesAsync);
     }
 
     public string StatusMessage
@@ -113,7 +117,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _autoCheck, value))
             {
                 _settings.AutoCheck = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
             }
         }
     }
@@ -126,7 +130,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _autoLocalize, value))
             {
                 _settings.AutoLocalize = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
             }
         }
     }
@@ -139,7 +143,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _startWithWindows, value))
             {
                 _settings.StartWithWindows = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
                 UpdateStartupRegistry(value, _silentStartup);
             }
         }
@@ -153,7 +157,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _silentStartup, value))
             {
                 _settings.SilentStartup = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
                 UpdateStartupRegistry(_startWithWindows, value);
             }
         }
@@ -214,7 +218,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _indexUrl, value))
             {
                 _settings.IndexUrl = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
                 IndexUrlList = value.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).ToList();
             }
         }
@@ -234,7 +238,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _checkIntervalMinutes, value))
             {
                 _settings.CheckIntervalMinutes = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
             }
         }
     }
@@ -247,7 +251,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             if (SetProperty(ref _backupCount, value))
             {
                 _settings.BackupCount = value;
-                _settingsManager.SaveSettingsAsync(_settings);
+                _ = _settingsManager.SaveSettingsAsync(_settings);
             }
         }
     }
@@ -261,11 +265,11 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
 
     public GitHubDesktopInfo? DesktopInfo => _desktopInfo;
 
-    public RelayCommand CheckForUpdatesCommand { get; } = null!;
-    public RelayCommand LocalizeCommand { get; } = null!;
-    public RelayCommand RestoreCommand { get; } = null!;
-    public RelayCommand DownloadLatestCommand { get; } = null!;
-    public RelayCommand CheckAppUpdatesCommand { get; } = null!;
+    public AsyncRelayCommand CheckForUpdatesCommand { get; } = null!;
+    public AsyncRelayCommand LocalizeCommand { get; } = null!;
+    public AsyncRelayCommand RestoreCommand { get; } = null!;
+    public AsyncRelayCommand DownloadLatestCommand { get; } = null!;
+    public AsyncRelayCommand CheckAppUpdatesCommand { get; } = null!;
 
     public async Task InitializeAsync()
     {
@@ -283,7 +287,6 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
         OnPropertyChanged(nameof(CheckIntervalMinutes));
         OnPropertyChanged(nameof(BackupCount));
 
-        // Use the user-configured index URL (falls back to cache/bundled index on failure)
         var appDirectory = AppDomain.CurrentDomain.BaseDirectory;
         var urls = _settings.IndexUrl
             .Split(new[] { '\r', '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)
@@ -291,7 +294,11 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             .Where(u => !string.IsNullOrWhiteSpace(u))
             .ToList();
         if (urls.Count == 0)
-            urls.Add(DefaultIndexUrl);
+        {
+            urls.AddRange(DefaultIndexUrl.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(u => u.Trim())
+                .Where(u => !string.IsNullOrWhiteSpace(u)));
+        }
         _patchIndexService = new PatchIndexService(
             urls,
             Path.Combine(_dataDirectory, "cache", "index.json"),
@@ -326,23 +333,15 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
         }
 
         if (_state?.LocalizedVersion != null)
-        {
             LocalizedVersion = _state.LocalizedVersion;
-        }
         else
-        {
             LocalizedVersion = string.Empty;
-        }
 
         if (_state?.LastCheckTime != null)
-        {
             LastCheckTime = _state.LastCheckTime.Value.ToString("yyyy-MM-dd HH:mm:ss");
-        }
 
         if (_state?.LastOperationTime != null)
-        {
             LastOperationTime = _state.LastOperationTime.Value.ToString("yyyy-MM-dd HH:mm:ss");
-        }
     }
 
     public async Task CheckForUpdatesAsync()
@@ -353,14 +352,21 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             return;
         }
 
-        IsBusy = true;
-        CurrentStep = "正在连接资源仓库...";
-        StatusMessage = "正在检查更新...";
-        _logger.Info("Checking for updates");
-        AppendLog("开始检查更新");
+        if (!await _operationLock.WaitAsync(0))
+        {
+            StatusMessage = "已有任务正在执行，请稍候";
+            AppendLog("检查更新跳过：已有任务在执行", "WARN");
+            return;
+        }
 
         try
         {
+            IsBusy = true;
+            CurrentStep = "正在连接资源仓库...";
+            StatusMessage = "正在检查更新...";
+            _logger.Info("Checking for updates");
+            AppendLog("开始检查更新");
+
             _patchIndex = await _patchIndexService.LoadIndexAsync();
             if (_patchIndex == null || _patchIndex.Patches.Length == 0)
             {
@@ -373,7 +379,6 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
 
             CurrentStep = "正在匹配版本...";
 
-            // 列出所有可用版本
             var allVersions = string.Join(", ", _patchIndex.Patches.Select(p => p.Version));
             _logger.Info($"Available patches: {allVersions}");
             AppendLog($"索引加载成功，可用版本: {allVersions}");
@@ -388,7 +393,6 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             }
             else
             {
-                // 没有精确匹配，查找最接近的可用补丁
                 PatchEntry? fallback = null;
                 if (Version.TryParse(_desktopInfo.Version, out var desktopVer))
                 {
@@ -441,6 +445,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
         {
             CurrentStep = string.Empty;
             IsBusy = false;
+            _operationLock.Release();
         }
     }
 
@@ -453,165 +458,267 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             return;
         }
 
-        if (_patchIndex == null)
+        if (!await _operationLock.WaitAsync(0))
         {
-            _patchIndex = await _patchIndexService.LoadIndexAsync();
-            if (_patchIndex == null)
-            {
-                StatusMessage = "无法加载补丁索引";
-                AppendLog("无法加载补丁索引", "ERROR");
-                return;
-            }
+            StatusMessage = "已有任务正在执行，请稍候";
+            AppendLog("汉化跳过：已有任务在执行", "WARN");
+            return;
         }
-
-        var patch = _patchIndexService.FindPatch(_patchIndex, _desktopInfo.Version);
-        if (patch == null)
-        {
-            // 没有精确匹配，查找最接近的可用补丁（向下兼容）
-            StatusMessage = $"未找到适用于版本 {_desktopInfo.Version} 的精确匹配补丁，正在查找可用补丁...";
-            _logger.Info($"No exact patch for version {_desktopInfo.Version}, searching for compatible patch");
-            AppendLog($"当前版本 {_desktopInfo.Version} 无精确匹配，查找最接近版本...");
-
-            PatchEntry? fallback = null;
-            if (Version.TryParse(_desktopInfo.Version, out var desktopVer))
-            {
-                int bestDist = int.MaxValue;
-                foreach (var p in _patchIndex.Patches)
-                {
-                    if (!Version.TryParse(p.Version, out var pv)) continue;
-                    int dist = Math.Abs(desktopVer.Major - pv.Major) * 10000
-                              + Math.Abs(desktopVer.Minor - pv.Minor) * 100
-                              + Math.Abs(desktopVer.Build - pv.Build);
-                    if (dist < bestDist)
-                    {
-                        bestDist = dist;
-                        fallback = p;
-                    }
-                }
-            }
-            else if (_patchIndex.Patches.Length > 0)
-            {
-                fallback = _patchIndex.Patches[0];
-            }
-
-            if (fallback == null)
-            {
-                StatusMessage = "索引中没有可用补丁";
-                AppendLog("索引中没有可用补丁", "ERROR");
-                return;
-            }
-
-            patch = fallback;
-            StatusMessage = $"将尝试安装补丁版本 {patch.Version}（向下兼容）";
-            AppendLog($"选择兼容补丁版本 {patch.Version}");
-        }
-
-        IsBusy = true;
 
         try
         {
-            // Step 1: Download
-            CurrentStep = "① 下载汉化资源...";
-            StatusMessage = "正在下载补丁...";
-            _logger.Info($"Downloading patch {patch.Version}");
-            AppendLog($"开始下载补丁 {patch.Version}，URL: {patch.Url}");
-
-            var cacheDirectory = Path.Combine(_dataDirectory, "cache");
-            var result = await _downloadService.DownloadPatchAsync(patch, cacheDirectory);
-
-            if (!result.Success)
+            if (_patchIndex == null)
             {
-                StatusMessage = $"汉化资源校验失败: {result.Error}。本次操作已取消";
-                _logger.Error($"Download failed: {result.Error}");
-                AppendLog($"下载失败: {result.Error}", "ERROR");
-                return;
-            }
-            AppendLog($"下载成功，文件: {result.FilePath}");
-
-            // Step 2: Load manifest
-            CurrentStep = "② 解析补丁清单...";
-            StatusMessage = "正在解析补丁...";
-            var manifest = LoadManifestFromZip(result.FilePath);
-            if (manifest == null)
-            {
-                // 没有 manifest.json，尝试直接列出压缩包中的文件（社区格式）
-                AppendLog("未找到 manifest.json，尝试识别压缩包中的补丁文件");
-                manifest = CreateDefaultManifest(result.FilePath, patch.Version);
-                if (manifest == null)
+                _patchIndex = await _patchIndexService.LoadIndexAsync();
+                if (_patchIndex == null)
                 {
-                    StatusMessage = "无法加载补丁清单，压缩包中未找到可识别的补丁文件";
-                    _logger.Error("Failed to load manifest and no patch files found");
-                    AppendLog("压缩包中未找到 main.js/renderer.js 等补丁文件", "ERROR");
+                    StatusMessage = "无法加载补丁索引";
+                    AppendLog("无法加载补丁索引", "ERROR");
                     return;
                 }
-                AppendLog($"从压缩包中识别到 {manifest.Files.Length} 个补丁文件: {string.Join(", ", manifest.Files)}");
             }
-            else
+
+            var patch = _patchIndexService.FindPatch(_patchIndex, _desktopInfo.Version);
+            if (patch == null)
             {
-                AppendLog($"清单版本: {manifest.Version}，文件数: {manifest.Files.Length}");
+                StatusMessage = $"未找到适用于版本 {_desktopInfo.Version} 的精确匹配补丁，正在查找可用补丁...";
+                _logger.Info($"No exact patch for version {_desktopInfo.Version}, searching for compatible patch");
+                AppendLog($"当前版本 {_desktopInfo.Version} 无精确匹配，查找最接近版本...");
+
+                PatchEntry? fallback = null;
+                if (Version.TryParse(_desktopInfo.Version, out var desktopVer))
+                {
+                    int bestDist = int.MaxValue;
+                    foreach (var p in _patchIndex.Patches)
+                    {
+                        if (!Version.TryParse(p.Version, out var pv)) continue;
+                        int dist = Math.Abs(desktopVer.Major - pv.Major) * 10000
+                                  + Math.Abs(desktopVer.Minor - pv.Minor) * 100
+                                  + Math.Abs(desktopVer.Build - pv.Build);
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            fallback = p;
+                        }
+                    }
+                }
+                else if (_patchIndex.Patches.Length > 0)
+                {
+                    fallback = _patchIndex.Patches[0];
+                }
+
+                if (fallback == null)
+                {
+                    StatusMessage = "索引中没有可用补丁";
+                    AppendLog("索引中没有可用补丁", "ERROR");
+                    return;
+                }
+
+                patch = fallback;
+
+                var isExactMatch = _patchIndexService.FindPatch(_patchIndex, _desktopInfo.Version) != null;
+                if (!isExactMatch)
+                {
+                    var confirmResult = System.Windows.MessageBox.Show(
+                        $"当前 GitHub Desktop 版本：{_desktopInfo.Version}\n" +
+                        $"准备使用的补丁版本：{patch.Version}\n\n" +
+                        $"该补丁没有明确声明兼容当前版本。\n" +
+                        $"继续使用可能导致 GitHub Desktop 部分功能异常或无法启动。\n\n" +
+                        $"是否继续？",
+                        "版本兼容性确认",
+                        System.Windows.MessageBoxButton.OKCancel,
+                        System.Windows.MessageBoxImage.Warning);
+
+                    if (confirmResult != System.Windows.MessageBoxResult.OK)
+                    {
+                        StatusMessage = "用户取消了汉化操作";
+                        AppendLog("用户取消了版本不匹配的汉化操作");
+                        return;
+                    }
+                }
+
+                StatusMessage = $"将尝试安装补丁版本 {patch.Version}（向下兼容）";
+                AppendLog($"选择兼容补丁版本 {patch.Version}");
             }
 
-            if (!string.Equals(manifest.Version, _desktopInfo.Version, StringComparison.OrdinalIgnoreCase))
+            IsBusy = true;
+            string? backupDirBefore = Path.Combine(_dataDirectory, "backup", _desktopInfo.Version);
+            bool backupExistedBefore = Directory.Exists(backupDirBefore);
+
+            try
             {
-                // 向下兼容：补丁版本与 Desktop 版本不一致时仅警告，不阻止导入
-                StatusMessage = $"警告: 补丁版本 ({manifest.Version}) 与 Desktop 版本 ({_desktopInfo.Version}) 不一致，尝试兼容安装...";
-                _logger.Warning($"Manifest version {manifest.Version} != desktop version {_desktopInfo.Version}, attempting compatible install");
-                AppendLog($"版本不一致: 补丁 {manifest.Version} ≠ Desktop {_desktopInfo.Version}，尝试兼容安装", "WARN");
+                // Step 1: Download
+                CurrentStep = "① 下载汉化资源...";
+                StatusMessage = "正在下载补丁...";
+                _logger.Info($"Downloading patch {patch.Version}");
+                AppendLog($"开始下载补丁 {patch.Version}，URL: {patch.Url}");
+
+                var cacheDirectory = Path.Combine(_dataDirectory, "cache");
+                var result = await _downloadService.DownloadPatchAsync(patch, cacheDirectory);
+
+                if (!result.Success)
+                {
+                    StatusMessage = $"汉化资源校验失败: {result.Error}。本次操作已取消";
+                    _logger.Error($"Download failed: {result.Error}");
+                    AppendLog($"下载失败: {result.Error}", "ERROR");
+                    return;
+                }
+                AppendLog($"下载成功，文件: {result.FilePath}");
+
+                // Step 2: Load manifest
+                CurrentStep = "② 解析补丁清单...";
+                StatusMessage = "正在解析补丁...";
+                var manifest = LoadManifestFromZip(result.FilePath);
+                if (manifest == null)
+                {
+                    AppendLog("未找到 manifest.json，尝试识别压缩包中的补丁文件");
+                    manifest = CreateDefaultManifest(result.FilePath, patch.Version);
+                    if (manifest == null)
+                    {
+                        StatusMessage = "无法加载补丁清单，压缩包中未找到可识别的补丁文件";
+                        _logger.Error("Failed to load manifest and no patch files found");
+                        AppendLog("压缩包中未找到 main.js/renderer.js 等补丁文件", "ERROR");
+                        return;
+                    }
+                    AppendLog($"从压缩包中识别到 {manifest.Files.Length} 个补丁文件: {string.Join(", ", manifest.Files)}");
+                }
+                else
+                {
+                    AppendLog($"清单版本: {manifest.Version}，文件数: {manifest.Files.Length}");
+                }
+
+                if (!string.Equals(manifest.Version, _desktopInfo.Version, StringComparison.OrdinalIgnoreCase))
+                {
+                    StatusMessage = $"警告: 补丁版本 ({manifest.Version}) 与 Desktop 版本 ({_desktopInfo.Version}) 不一致，尝试兼容安装...";
+                    _logger.Warning($"Manifest version {manifest.Version} != desktop version {_desktopInfo.Version}, attempting compatible install");
+                    AppendLog($"版本不一致: 补丁 {manifest.Version} ≠ Desktop {_desktopInfo.Version}，尝试兼容安装", "WARN");
+                }
+
+                // Validate all paths before any file operations
+                CurrentStep = "②⑤ 校验补丁路径...";
+                foreach (var file in manifest.Files)
+                {
+                    SafePathResolver.EnsureSafePath(_desktopInfo.AppPath, file, "汉化路径预检");
+                }
+                AppendLog("所有补丁路径安全检查通过");
+
+                // Step 3: Close GitHub Desktop
+                CurrentStep = "③ 关闭 GitHub Desktop...";
+                StatusMessage = "正在关闭 GitHub Desktop...";
+                AppendLog("正在关闭 GitHub Desktop");
+                var closed = await _backupManager.CloseDesktopAsync();
+                if (!closed)
+                {
+                    StatusMessage = "无法关闭 GitHub Desktop，请手动关闭后重试";
+                    AppendLog("GitHub Desktop 无法关闭，汉化中止", "ERROR");
+                    return;
+                }
+                AppendLog("GitHub Desktop 已关闭");
+
+                // Step 4: Backup
+                CurrentStep = "④ 备份原始文件...";
+                StatusMessage = "正在备份文件...";
+                _logger.Info("Backing up files");
+                AppendLog("开始备份原始文件");
+                var backupOk = await _backupManager.BackupFilesAsync(_desktopInfo, manifest);
+                if (!backupOk)
+                {
+                    StatusMessage = "备份失败，汉化中止";
+                    AppendLog("备份失败，汉化中止", "ERROR");
+                    return;
+                }
+                AppendLog("备份完成");
+
+                // Step 5: Import
+                CurrentStep = "⑤ 导入汉化文件...";
+                StatusMessage = "正在导入文件...";
+                _logger.Info("Importing files");
+                AppendLog("开始导入汉化文件");
+                await _backupManager.ImportFilesAsync(_desktopInfo, result.FilePath, manifest);
+                AppendLog("汉化文件导入完成");
+
+                // Step 5.5: Ensure git\bin\git.exe exists
+                CurrentStep = "⑤⑤ 检查 git 路径...";
+                _backupManager.EnsureGitBinPath(_desktopInfo);
+                AppendLog("git 路径检查完成");
+
+                // Step 6: Verify file integrity
+                CurrentStep = "⑥ 验证文件完整性...";
+                StatusMessage = "正在验证...";
+                Dictionary<string, string>? expectedHashes = null;
+                if (manifest.FileHashes != null && manifest.FileHashes.Count > 0)
+                {
+                    expectedHashes = manifest.FileHashes;
+                }
+                if (!_backupManager.VerifyFiles(_desktopInfo, manifest, expectedHashes))
+                {
+                    StatusMessage = "文件验证失败，正在恢复...";
+                    _logger.Error("File verification failed, restoring");
+                    AppendLog("文件验证失败，正在回滚", "ERROR");
+                    var restoreOk = await _backupManager.RestoreAsync(_desktopInfo);
+                    if (restoreOk)
+                    {
+                        StatusMessage = "汉化失败，GitHub Desktop 已恢复到修改前状态";
+                        AppendLog("回滚成功，GitHub Desktop 已恢复");
+                    }
+                    else
+                    {
+                        StatusMessage = "汉化失败且自动恢复失败，请手动恢复备份";
+                        AppendLog("回滚失败，请手动恢复备份", "ERROR");
+                    }
+                    return;
+                }
+                AppendLog("文件验证通过（SHA-256 + 文件存在性）");
+
+                // Step 7: Done
+                CurrentStep = "⑦ 汉化完成！";
+                StatusMessage = "汉化完成";
+                StatusColor = "Green";
+                _logger.Info("Localization completed");
+                AppendLog("汉化完成！");
+
+                await _stateManager.UpdateLocalizedVersionAsync(_desktopInfo.Version);
+                LocalizedVersion = _desktopInfo.Version;
+
+                await _stateManager.UpdateLastCheckTimeAsync();
+                LastOperationTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
             }
-
-            // Step 3: Backup
-            CurrentStep = "③ 备份原始文件...";
-            StatusMessage = "正在备份文件...";
-            _logger.Info("Backing up files");
-            AppendLog("开始备份原始文件");
-            await _backupManager.BackupFilesAsync(_desktopInfo, manifest);
-            AppendLog("备份完成");
-
-            // Step 4: Import
-            CurrentStep = "④ 导入汉化文件...";
-            StatusMessage = "正在导入文件...";
-            _logger.Info("Importing files");
-            AppendLog("开始导入汉化文件");
-            await _backupManager.ImportFilesAsync(_desktopInfo, result.FilePath, manifest);
-            AppendLog("汉化文件导入完成");
-
-            // Step 4.5: Ensure git\bin\git.exe exists
-            CurrentStep = "④⑤ 检查 git 路径...";
-            _backupManager.EnsureGitBinPath(_desktopInfo);
-            AppendLog("git 路径检查完成");
-
-            // Step 5: Verify
-            CurrentStep = "⑤ 验证文件完整性...";
-            StatusMessage = "正在验证...";
-            if (!_backupManager.VerifyFiles(_desktopInfo, manifest))
+            catch (Exception ex)
             {
-                StatusMessage = "文件验证失败，正在恢复...";
-                _logger.Error("File verification failed, restoring");
-                AppendLog("文件验证失败，正在回滚", "ERROR");
-                _backupManager.RestoreFiles(_desktopInfo);
-                StatusMessage = "已恢复到备份状态";
-                AppendLog("已恢复到备份状态");
-                return;
+                StatusMessage = $"汉化失败: {ex.Message}";
+                _logger.Error($"Localization failed: {ex.Message}");
+                AppendLog($"汉化失败: {ex.Message}", "ERROR");
+
+                try
+                {
+                    AppendLog("正在尝试自动恢复...");
+                    var restoreOk = await _backupManager.RestoreAsync(_desktopInfo);
+                    if (restoreOk)
+                    {
+                        StatusMessage = "汉化失败，GitHub Desktop 已自动恢复";
+                        AppendLog("自动恢复成功");
+                    }
+                    else
+                    {
+                        StatusMessage = "汉化失败且自动恢复失败，请手动恢复备份";
+                        AppendLog("自动恢复失败，请手动恢复备份", "ERROR");
+                    }
+                }
+                catch (Exception restoreEx)
+                {
+                    StatusMessage = "汉化失败且自动恢复异常，请手动恢复备份";
+                    AppendLog($"自动恢复异常: {restoreEx.Message}", "ERROR");
+                }
             }
-            AppendLog("文件验证通过");
-
-            // Step 6: Done
-            CurrentStep = "⑥ 汉化完成！";
-            StatusMessage = "汉化完成";
-            StatusColor = "Green";
-            _logger.Info("Localization completed");
-            AppendLog("汉化完成！");
-
-            await _stateManager.UpdateLocalizedVersionAsync(_desktopInfo.Version);
-            LocalizedVersion = _desktopInfo.Version;
-
-            await _stateManager.UpdateLastCheckTimeAsync();
-            LastOperationTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            finally
+            {
+                IsBusy = false;
+                CurrentStep = string.Empty;
+            }
         }
         finally
         {
-            IsBusy = false;
-            CurrentStep = string.Empty;
+            _operationLock.Release();
         }
     }
 
@@ -624,15 +731,22 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             return;
         }
 
-        IsBusy = true;
-        StatusMessage = "正在恢复...";
-        CurrentStep = "正在恢复原始文件...";
-        _logger.Info("Restoring files");
-        AppendLog("开始恢复原始文件");
+        if (!await _operationLock.WaitAsync(0))
+        {
+            StatusMessage = "已有任务正在执行，请稍候";
+            AppendLog("恢复跳过：已有任务在执行", "WARN");
+            return;
+        }
 
         try
         {
-            var success = _backupManager.RestoreFiles(_desktopInfo);
+            IsBusy = true;
+            StatusMessage = "正在恢复...";
+            CurrentStep = "正在恢复原始文件...";
+            _logger.Info("Restoring files");
+            AppendLog("开始恢复原始文件");
+
+            var success = await _backupManager.RestoreAsync(_desktopInfo);
             if (success)
             {
                 StatusMessage = "恢复完成";
@@ -659,6 +773,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
         {
             IsBusy = false;
             CurrentStep = string.Empty;
+            _operationLock.Release();
         }
     }
 
@@ -670,13 +785,20 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             return;
         }
 
-        IsBusy = true;
-        CurrentStep = "正在获取索引...";
-        StatusMessage = "正在连接资源仓库...";
-        _logger.Info("Downloading latest patch");
+        if (!await _operationLock.WaitAsync(0))
+        {
+            StatusMessage = "已有任务正在执行，请稍候";
+            AppendLog("下载跳过：已有任务在执行", "WARN");
+            return;
+        }
 
         try
         {
+            IsBusy = true;
+            CurrentStep = "正在获取索引...";
+            StatusMessage = "正在连接资源仓库...";
+            _logger.Info("Downloading latest patch");
+
             _patchIndex = await _patchIndexService.LoadIndexAsync();
             if (_patchIndex == null || _patchIndex.Patches.Length == 0)
             {
@@ -734,69 +856,257 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
         {
             CurrentStep = string.Empty;
             IsBusy = false;
+            _operationLock.Release();
         }
     }
 
     public async Task CheckAppUpdatesAsync()
     {
-        IsBusy = true;
-        CurrentStep = "正在检查本软件更新...";
-        StatusMessage = "正在检查本软件更新...";
-        AppendLog("开始检查本软件更新");
+        if (!await _operationLock.WaitAsync(0))
+        {
+            StatusMessage = "已有任务正在执行，请稍候";
+            return;
+        }
 
         try
         {
-            using var http = new HttpClient();
-            http.DefaultRequestHeaders.UserAgent.ParseAdd("GitHubDesktopZh");
-            var response = await http.GetAsync("https://api.github.com/repos/yuzai114514/GitHubDesktopZh/releases/latest");
+            IsBusy = true;
+            CurrentStep = "正在检查本软件更新...";
+            StatusMessage = "正在检查本软件更新...";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            AppendLog("[Update] Start checking GitHubDesktopZh update");
 
-            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            var currentVersion = ParseVersion(
+                System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3));
+            AppendLog($"[Update] Current version: {currentVersion?.ToString() ?? "unknown"}");
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("GitHubDesktopZh");
+            http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+            // 1. Try /releases/latest
+            var latestTag = await FetchLatestReleaseAsync(http);
+            if (latestTag != null)
             {
-                StatusMessage = "暂无本软件更新（仓库暂无 Release）";
-                AppendLog("GitHub 仓库暂无 Release，跳过检查");
+                var remoteVersion = ParseVersion(latestTag.tagName);
+                AppendLog($"[Update] Remote version: {remoteVersion?.ToString() ?? "unknown"}");
+                AppendLog($"[Update] Elapsed: {sw.ElapsedMilliseconds} ms");
+
+                if (remoteVersion != null && currentVersion != null)
+                {
+                    var cmp = remoteVersion.CompareTo(currentVersion);
+                    if (cmp > 0)
+                    {
+                        StatusMessage = $"发现新版本 {latestTag.tagName}";
+                        AvailablePatchInfo = $"发现新版本: {latestTag.tagName}（当前: v{currentVersion}）\n{latestTag.body}";
+                        AppendLog("[Update] Result: NewVersion");
+                    }
+                    else if (cmp == 0)
+                    {
+                        StatusMessage = $"当前已是最新版本 v{currentVersion}";
+                        AvailablePatchInfo = $"本软件版本: v{currentVersion}（已是最新）";
+                        AppendLog("[Update] Result: Latest");
+                    }
+                    else
+                    {
+                        StatusMessage = $"当前安装版本 v{currentVersion} 高于公开版本 {latestTag.tagName}";
+                        AvailablePatchInfo = $"当前版本: v{currentVersion}，公开版本: {latestTag.tagName}\n无需更新";
+                        AppendLog("[Update] Result: LocalNewer");
+                    }
+                }
+                else
+                {
+                    StatusMessage = $"发现新版本 {latestTag.tagName}";
+                    AvailablePatchInfo = $"发现新版本: {latestTag.tagName}（当前: v{currentVersion?.ToString() ?? "unknown"}）\n{latestTag.body}";
+                    AppendLog("[Update] Result: NewVersion");
+                }
+
+                await _stateManager.UpdateLastCheckTimeAsync();
+                LastCheckTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
                 return;
             }
+
+            // 2. /releases/latest returned 404, try /releases list
+            AppendLog("[Update] /releases/latest not found, querying /releases list");
+            var releases = await FetchReleasesListAsync(http);
+            var stable = releases
+                .Where(r => !r.draft && !r.prerelease)
+                .OrderByDescending(r => ParseVersion(r.tagName) ?? new Version(0, 0, 0))
+                .FirstOrDefault();
+
+            if (stable == null)
+            {
+                StatusMessage = "未找到 GitHubDesktopZh 的正式发布版本";
+                AvailablePatchInfo = "当前仓库还没有正式发布版本";
+                AppendLog("[Update] Result: NoRelease");
+                AppendLog($"[Update] Elapsed: {sw.ElapsedMilliseconds} ms");
+
+                await _stateManager.UpdateLastCheckTimeAsync();
+                LastCheckTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                return;
+            }
+
+            var stableVersion = ParseVersion(stable.tagName);
+            AppendLog($"[Update] Remote version: {stableVersion?.ToString() ?? "unknown"}");
+            AppendLog($"[Update] Elapsed: {sw.ElapsedMilliseconds} ms");
+
+            if (stableVersion != null && currentVersion != null)
+            {
+                var cmp = stableVersion.CompareTo(currentVersion);
+                if (cmp > 0)
+                {
+                    StatusMessage = $"发现新版本 {stable.tagName}";
+                    AvailablePatchInfo = $"发现新版本: {stable.tagName}（当前: v{currentVersion}）\n{stable.body}";
+                    AppendLog("[Update] Result: NewVersion");
+                }
+                else if (cmp == 0)
+                {
+                    StatusMessage = $"当前已是最新版本 v{currentVersion}";
+                    AvailablePatchInfo = $"本软件版本: v{currentVersion}（已是最新）";
+                    AppendLog("[Update] Result: Latest");
+                }
+                else
+                {
+                    StatusMessage = $"当前安装版本 v{currentVersion} 高于公开版本 {stable.tagName}";
+                    AvailablePatchInfo = $"当前版本: v{currentVersion}，公开版本: {stable.tagName}\n无需更新";
+                    AppendLog("[Update] Result: LocalNewer");
+                }
+            }
+            else
+            {
+                StatusMessage = $"发现新版本 {stable.tagName}";
+                AvailablePatchInfo = $"发现新版本: {stable.tagName}（当前: v{currentVersion?.ToString() ?? "unknown"}）\n{stable.body}";
+                AppendLog("[Update] Result: NewVersion");
+            }
+
+            await _stateManager.UpdateLastCheckTimeAsync();
+            LastCheckTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+        }
+        catch (TaskCanceledException)
+        {
+            StatusMessage = "连接 GitHub 超时";
+            _logger.Error("Check app updates timed out");
+            AppendLog("[Update] Result: Timeout", "ERROR");
+        }
+        catch (HttpRequestException ex)
+        {
+            var msg = ex.StatusCode switch
+            {
+                System.Net.HttpStatusCode.Forbidden => "GitHub API 请求受限，稍后重试",
+                System.Net.HttpStatusCode.BadGateway or System.Net.HttpStatusCode.ServiceUnavailable
+                    or System.Net.HttpStatusCode.GatewayTimeout => "GitHub 服务暂时不可用",
+                _ => $"无法连接 GitHub，请检查网络、代理或 VPN 设置"
+            };
+            StatusMessage = msg;
+            _logger.Error($"Check app updates failed: {ex.Message}");
+            AppendLog($"[Update] Result: NetworkError - {ex.Message}", "ERROR");
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"检查本软件更新失败: {ex.Message}";
+            _logger.Error($"Check app updates failed: {ex.Message}");
+            AppendLog($"[Update] Result: Error - {ex.Message}", "ERROR");
+        }
+        finally
+        {
+            CurrentStep = string.Empty;
+            IsBusy = false;
+            _operationLock.Release();
+        }
+    }
+
+    private async Task<ReleaseInfo?> FetchLatestReleaseAsync(HttpClient http)
+    {
+        try
+        {
+            var response = await http.GetAsync("https://api.github.com/repos/yuzai114514/GitHubDesktopZh/releases/latest");
+            AppendLog($"[Update] HTTP status: {(int)response.StatusCode}");
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return null;
 
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync();
             var doc = System.Text.Json.JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            var latestTag = root.GetProperty("tag_name").GetString() ?? "";
-            var body = root.GetProperty("body").GetString() ?? "";
-
-            // 获取当前版本
-            var currentVersion = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "0.0.0";
-
-            AppendLog($"当前版本: {currentVersion}，最新版本: {latestTag}");
-
-            if (string.Equals(currentVersion.TrimStart('v'), latestTag.TrimStart('v'), StringComparison.OrdinalIgnoreCase))
+            return new ReleaseInfo
             {
-                StatusMessage = $"当前已是最新版本 {currentVersion}";
-                AvailablePatchInfo = $"本软件版本: {currentVersion}（已是最新）";
-                AppendLog("本软件已是最新版本");
-            }
-            else
+                tagName = root.GetProperty("tag_name").GetString() ?? "",
+                body = root.GetProperty("body").GetString() ?? "",
+                draft = root.TryGetProperty("draft", out var d) && d.GetBoolean(),
+                prerelease = root.TryGetProperty("prerelease", out var p) && p.GetBoolean()
+            };
+        }
+        catch (HttpRequestException)
+        {
+            throw;
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidOperationException($"GitHub 返回的更新信息无法解析: {ex.Message}", ex);
+        }
+    }
+
+    private async Task<List<ReleaseInfo>> FetchReleasesListAsync(HttpClient http)
+    {
+        try
+        {
+            var response = await http.GetAsync("https://api.github.com/repos/yuzai114514/GitHubDesktopZh/releases?per_page=20");
+            AppendLog($"[Update] /releases HTTP status: {(int)response.StatusCode}");
+
+            if (!response.IsSuccessStatusCode)
+                return new List<ReleaseInfo>();
+
+            var json = await response.Content.ReadAsStringAsync();
+            var doc = System.Text.Json.JsonDocument.Parse(json);
+            var result = new List<ReleaseInfo>();
+
+            foreach (var item in doc.RootElement.EnumerateArray())
             {
-                StatusMessage = $"发现新版本 {latestTag}";
-                AvailablePatchInfo = $"发现新版本: {latestTag}（当前: {currentVersion}）\n{body}";
-                AppendLog($"发现新版本: {latestTag}");
+                result.Add(new ReleaseInfo
+                {
+                    tagName = item.TryGetProperty("tag_name", out var t) ? (t.GetString() ?? "") : "",
+                    body = item.TryGetProperty("body", out var b) ? (b.GetString() ?? "") : "",
+                    draft = item.TryGetProperty("draft", out var d) && d.GetBoolean(),
+                    prerelease = item.TryGetProperty("prerelease", out var p) && p.GetBoolean()
+                });
             }
 
-            await _stateManager.UpdateLastCheckTimeAsync();
-            LastCheckTime = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            return result;
         }
-        catch (Exception ex)
+        catch
         {
-            StatusMessage = $"检查本软件更新失败: {ex.Message}";
-            _logger.Error($"Check app updates failed: {ex.Message}");
-            AppendLog($"检查本软件更新失败: {ex.Message}", "ERROR");
+            return new List<ReleaseInfo>();
         }
-        finally
-        {
-            CurrentStep = string.Empty;
-            IsBusy = false;
-        }
+    }
+
+    private static Version? ParseVersion(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        value = value.Trim();
+        if (value.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+            value = value[1..];
+
+        var plusIndex = value.IndexOf('+');
+        if (plusIndex >= 0)
+            value = value[..plusIndex];
+
+        var dashIndex = value.IndexOf('-');
+        if (dashIndex >= 0)
+            value = value[..dashIndex];
+
+        return Version.TryParse(value, out var version) ? version : null;
+    }
+
+    private class ReleaseInfo
+    {
+        public string tagName { get; set; } = "";
+        public string body { get; set; } = "";
+        public bool draft { get; set; }
+        public bool prerelease { get; set; }
     }
 
     private Manifest? LoadManifestFromZip(string filePath)
@@ -810,7 +1120,7 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
             {
                 using var fileStream = File.OpenRead(filePath);
                 using var archive = ArchiveFactory.Open(fileStream);
-                var entry = archive.Entries.FirstOrDefault(e => e.Key.EndsWith("manifest.json", StringComparison.OrdinalIgnoreCase));
+                var entry = archive.Entries.FirstOrDefault(e => e.Key != null && e.Key.EndsWith("manifest.json", StringComparison.OrdinalIgnoreCase));
                 if (entry != null)
                 {
                     using var entryStream = entry.OpenEntryStream();
@@ -851,12 +1161,11 @@ https://raw.githubusercontent.com/goldsv2026/GitHub_Desktop_Simplified_Chinese/m
                 foreach (var entry in archive.Entries.Where(e => !e.IsDirectory))
                 {
                     var name = Path.GetFileName(entry.Key);
-                    if (name.Equals("main.js", StringComparison.OrdinalIgnoreCase) ||
-                        name.Equals("renderer.js", StringComparison.OrdinalIgnoreCase))
+                    if (name != null &&
+                        (name.Equals("main.js", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("renderer.js", StringComparison.OrdinalIgnoreCase)))
                     {
-                        // 保留相对路径结构
                         var relativePath = entry.Key.Replace('\\', '/');
-                        // 去掉可能的前缀目录 (如 Version/3.6.4/Windows/)
                         var idx = relativePath.LastIndexOf('/');
                         files.Add(idx >= 0 ? relativePath[(idx + 1)..] : relativePath);
                     }

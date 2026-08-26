@@ -8,13 +8,17 @@ namespace GitHubDesktopZh.Core.Services;
 public class BackupManager
 {
     private readonly string _backupRoot;
+    private readonly DesktopProcessService _desktopProcess;
+    private readonly Logger? _logger;
 
-    public BackupManager(string backupRoot)
+    public BackupManager(string backupRoot, Logger? logger = null)
     {
         _backupRoot = backupRoot;
+        _desktopProcess = new DesktopProcessService();
+        _logger = logger;
     }
 
-    public async Task BackupFilesAsync(GitHubDesktopInfo desktopInfo, Manifest manifest)
+    public async Task<bool> BackupFilesAsync(GitHubDesktopInfo desktopInfo, Manifest manifest)
     {
         var backupDir = GetBackupDirectory(desktopInfo.Version);
         if (Directory.Exists(backupDir))
@@ -23,38 +27,40 @@ public class BackupManager
             if (isChinese)
             {
                 Directory.Delete(backupDir, true);
+                _logger?.Info("删除了包含中文内容的旧备份");
             }
             else
             {
-                return;
+                _logger?.Info("备份目录已存在且为英文原版，跳过备份");
+                return true;
             }
         }
 
-        // 尝试从旧版本复制英文原版
         var restoredFromOld = RestoreFromOldVersion(desktopInfo, manifest);
         if (restoredFromOld)
         {
-            return;
+            _logger?.Info("从旧版本恢复英文原版备份成功");
+            return true;
         }
 
         Directory.CreateDirectory(backupDir);
-
         foreach (var file in manifest.Files)
         {
-            var sourcePath = Path.Combine(desktopInfo.AppPath, file);
-            var destPath = Path.Combine(backupDir, file);
+            SafePathResolver.EnsureSafePath(desktopInfo.AppPath, file, "备份");
+            var sourcePath = SafePathResolver.ResolveSafePath(desktopInfo.AppPath, file);
+            var destPath = SafePathResolver.ResolveSafePath(backupDir, file);
 
             if (File.Exists(sourcePath))
             {
                 var destDir = Path.GetDirectoryName(destPath);
                 if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
-                {
                     Directory.CreateDirectory(destDir);
-                }
 
                 File.Copy(sourcePath, destPath, true);
+                _logger?.Debug($"备份文件: {file}");
             }
         }
+        return true;
     }
 
     public async Task ImportFilesAsync(GitHubDesktopInfo desktopInfo, string patchFilePath, Manifest manifest)
@@ -68,6 +74,7 @@ public class BackupManager
             using var archive = ArchiveFactory.Open(fileStream);
             foreach (var file in manifest.Files)
             {
+                SafePathResolver.EnsureSafePath(desktopInfo.AppPath, file, "导入");
                 var fileName = Path.GetFileName(file);
                 var entry = archive.Entries.FirstOrDefault(e =>
                     !e.IsDirectory &&
@@ -75,7 +82,7 @@ public class BackupManager
 
                 if (entry != null)
                 {
-                    var destPath = Path.Combine(desktopInfo.AppPath, file);
+                    var destPath = SafePathResolver.ResolveSafePath(desktopInfo.AppPath, file);
                     var destDir = Path.GetDirectoryName(destPath);
                     if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
                         Directory.CreateDirectory(destDir);
@@ -83,23 +90,26 @@ public class BackupManager
                     using var entryStream = entry.OpenEntryStream();
                     using var destStream = File.Create(destPath);
                     await entryStream.CopyToAsync(destStream);
+                    _logger?.Debug($"导入文件: {file}");
+                }
+                else
+                {
+                    _logger?.Warning($"补丁中未找到文件: {file}");
                 }
             }
         }
         else
         {
-            var tempDir = Path.Combine(Path.GetTempPath(), "GitHubDesktopZh_Patch");
-            if (Directory.Exists(tempDir))
-                Directory.Delete(tempDir, true);
-
+            var tempDir = Path.Combine(Path.GetTempPath(), $"GitHubDesktopZh_Patch_{Guid.NewGuid():N}");
             try
             {
                 ZipFile.ExtractToDirectory(patchFilePath, tempDir);
 
                 foreach (var file in manifest.Files)
                 {
+                    SafePathResolver.EnsureSafePath(desktopInfo.AppPath, file, "导入");
                     var sourcePath = FindFileInDirectory(tempDir, file);
-                    var destPath = Path.Combine(desktopInfo.AppPath, file);
+                    var destPath = SafePathResolver.ResolveSafePath(desktopInfo.AppPath, file);
 
                     if (sourcePath != null)
                     {
@@ -108,6 +118,11 @@ public class BackupManager
                             Directory.CreateDirectory(destDir);
 
                         File.Copy(sourcePath, destPath, true);
+                        _logger?.Debug($"导入文件: {file}");
+                    }
+                    else
+                    {
+                        _logger?.Warning($"补丁中未找到文件: {file}");
                     }
                 }
             }
@@ -119,45 +134,55 @@ public class BackupManager
         }
     }
 
-    public bool RestoreFiles(GitHubDesktopInfo desktopInfo)
+    public async Task<bool> RestoreAsync(GitHubDesktopInfo desktopInfo)
     {
         var backupDir = GetBackupDirectory(desktopInfo.Version);
         if (!Directory.Exists(backupDir))
         {
+            _logger?.Error("备份目录不存在，无法恢复");
+            return false;
+        }
+
+        var closed = await _desktopProcess.CloseAndWaitAsync(5000);
+        if (!closed)
+        {
+            _logger?.Error("无法关闭 GitHub Desktop，恢复中止");
             return false;
         }
 
         try
         {
-            try
-            {
-                var processes = System.Diagnostics.Process.GetProcessesByName("GitHub Desktop");
-                foreach (var proc in processes)
-                {
-                    try { proc.Kill(); } catch { }
-                }
-                System.Threading.Thread.Sleep(1000);
-            }
-            catch { }
-
             CopyDirectory(backupDir, desktopInfo.AppPath);
             return true;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"RestoreFiles failed: {ex.Message}");
+            _logger?.Error($"恢复文件失败: {ex.Message}");
             return false;
         }
     }
 
-    public bool VerifyFiles(GitHubDesktopInfo desktopInfo, Manifest manifest)
+    public bool VerifyFiles(GitHubDesktopInfo desktopInfo, Manifest manifest, Dictionary<string, string>? expectedHashes = null)
     {
         foreach (var file in manifest.Files)
         {
-            var filePath = Path.Combine(desktopInfo.AppPath, file);
+            SafePathResolver.EnsureSafePath(desktopInfo.AppPath, file, "验证");
+            var filePath = SafePathResolver.ResolveSafePath(desktopInfo.AppPath, file);
             if (!File.Exists(filePath))
             {
+                _logger?.Error($"验证失败: 文件不存在 {file}");
                 return false;
+            }
+
+            if (expectedHashes != null && expectedHashes.TryGetValue(file, out var expectedHash))
+            {
+                var (success, actualHash, error) = FileIntegrityService.VerifyWithDetails(filePath, expectedHash);
+                if (!success)
+                {
+                    _logger?.Error($"验证失败: {file} - {error}");
+                    return false;
+                }
+                _logger?.Debug($"SHA-256 校验通过: {file} = {actualHash}");
             }
         }
 
@@ -169,7 +194,7 @@ public class BackupManager
         if (!Directory.Exists(_backupRoot))
             return;
 
-        var directories = Directory.GetDirectories(_backupRoot)
+        var directories = Directory.GetDirectories(Path.Combine(_backupRoot, "backup"))
             .OrderBy(d => Directory.GetLastWriteTime(d))
             .ToList();
 
@@ -177,6 +202,7 @@ public class BackupManager
         {
             var dirToDelete = directories.First();
             Directory.Delete(dirToDelete, true);
+            _logger?.Info($"清理旧备份: {Path.GetFileName(dirToDelete)}");
             directories.RemoveAt(0);
         }
     }
@@ -184,37 +210,44 @@ public class BackupManager
     public void EnsureGitBinPath(GitHubDesktopInfo desktopInfo)
     {
         var appPath = desktopInfo.AppPath;
-        var expectedGitPath = Path.Combine(appPath, "git", "bin", "git.exe");
+        var expectedGitPath = SafePathResolver.ResolveSafePath(appPath, "git/bin/git.exe");
 
         if (File.Exists(expectedGitPath))
             return;
 
         var candidates = new[]
         {
-            Path.Combine(appPath, "git", "cmd", "git.exe"),
-            Path.Combine(appPath, "git", "mingw64", "bin", "git.exe"),
-            Path.Combine(appPath, "git", "usr", "bin", "git.exe")
+            "git/cmd/git.exe",
+            "git/mingw64/bin/git.exe",
+            "git/usr/bin/git.exe"
         };
 
         foreach (var candidate in candidates)
         {
-            if (File.Exists(candidate))
+            var candidatePath = SafePathResolver.ResolveSafePath(appPath, candidate);
+            if (File.Exists(candidatePath))
             {
                 var binDir = Path.GetDirectoryName(expectedGitPath);
                 if (!string.IsNullOrEmpty(binDir) && !Directory.Exists(binDir))
                     Directory.CreateDirectory(binDir);
 
-                File.Copy(candidate, expectedGitPath, true);
+                File.Copy(candidatePath, expectedGitPath, true);
+                _logger?.Info($"创建 git\\bin\\git.exe → {candidate}");
                 return;
             }
         }
+    }
+
+    public async Task<bool> CloseDesktopAsync()
+    {
+        return await _desktopProcess.CloseAndWaitAsync(5000);
     }
 
     private bool IsBackupChinese(string backupDir, Manifest manifest)
     {
         foreach (var file in manifest.Files)
         {
-            var filePath = Path.Combine(backupDir, Path.GetFileName(file));
+            var filePath = SafePathResolver.ResolveSafePath(backupDir, file);
             if (!File.Exists(filePath)) continue;
 
             try
@@ -256,7 +289,7 @@ public class BackupManager
             var isChinese = false;
             foreach (var file in manifest.Files)
             {
-                var filePath = Path.Combine(appPath, Path.GetFileName(file));
+                var filePath = SafePathResolver.ResolveSafePath(appPath, file);
                 if (!File.Exists(filePath)) continue;
                 try
                 {
@@ -277,11 +310,15 @@ public class BackupManager
                 Directory.CreateDirectory(backupDir);
                 foreach (var file in manifest.Files)
                 {
-                    var sourcePath = Path.Combine(appPath, Path.GetFileName(file));
-                    var destPath = Path.Combine(backupDir, Path.GetFileName(file));
+                    var sourcePath = SafePathResolver.ResolveSafePath(appPath, file);
+                    var destPath = SafePathResolver.ResolveSafePath(backupDir, file);
                     if (File.Exists(sourcePath))
                     {
+                        var destDir = Path.GetDirectoryName(destPath);
+                        if (!string.IsNullOrEmpty(destDir) && !Directory.Exists(destDir))
+                            Directory.CreateDirectory(destDir);
                         File.Copy(sourcePath, destPath, true);
+                        _logger?.Info($"从旧版本 {Path.GetFileName(oldDir)} 复制原版文件: {file}");
                     }
                 }
                 return true;
@@ -294,9 +331,7 @@ public class BackupManager
     private void CopyDirectory(string source, string destination)
     {
         if (!Directory.Exists(destination))
-        {
             Directory.CreateDirectory(destination);
-        }
 
         foreach (var file in Directory.GetFiles(source))
         {
@@ -307,7 +342,8 @@ public class BackupManager
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"Failed to copy {file}: {ex.Message}");
+                _logger?.Error($"复制文件失败 {file}: {ex.Message}");
+                throw;
             }
         }
 
