@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GitHub Desktop Simplified Chinese Patch Index",
+  "description": "Schema for the index.json file listing available Chinese localization patches for GitHub Desktop.",
+  "type": "object",
+  "properties": {
+    "patches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["version", "url", "sha256", "size"],
+        "properties": {
+          "version": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "description": "Exact GitHub Desktop version this patch applies to."
+          },
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL to download the zip patch file."
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-fA-F0-9]{64}$",
+            "description": "SHA-256 hash of the zip file."
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Size of the zip file in bytes."
+          },
+          "compat": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "description": "Optional list of compatible GitHub Desktop versions. If omitted, only exact version match is allowed."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["patches"],
+  "additionalProperties": false
+}

@@ -1,0 +1,10 @@
+{
+  "patches": [
+    {
+      "version": "3.6.4",
+      "url": "https://github.com/743859910/GitHub_Desktop_Simplified_Chinese/releases/download/Latest-Version/3.6.4.rar",
+      "sha256": "a78fced4b785c1cd27efe7230c6522fc6b17370de6ec77c9bb4841186ff2acfc",
+      "size": 2934864
+    }
+  ]
+}

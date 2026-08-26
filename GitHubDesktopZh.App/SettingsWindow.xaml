@@ -1,0 +1,87 @@
+<ui:FluentWindow x:Class="GitHubDesktopZh.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        xmlns:local="clr-namespace:GitHubDesktopZh.App"
+        mc:Ignorable="d"
+        Title="设置" Height="420" Width="480"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <ui:TitleBar Grid.Row="0" Title="设置" ShowMaximize="False"/>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <!-- 安装路径 -->
+                <ui:CardExpander Header="GitHub Desktop" IsExpanded="False" Margin="0,0,0,12">
+                    <StackPanel Margin="8,0,0,0">
+                        <TextBlock Text="安装路径" Opacity="0.7" Margin="0,0,0,6"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="8"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0" Text="{Binding InstallationPath, UpdateSourceTrigger=PropertyChanged}"/>
+                            <ui:Button Grid.Column="2" Content="浏览" MinWidth="60"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:CardExpander>
+
+                <!-- 资源仓库 -->
+                <ui:CardExpander Header="资源仓库" IsExpanded="False" Margin="0,0,0,12">
+                    <StackPanel Margin="8,0,0,0">
+                        <TextBlock Text="索引 URL" Opacity="0.7" Margin="0,0,0,6"/>
+                        <TextBox Text="{Binding IndexUrl, UpdateSourceTrigger=PropertyChanged}"/>
+                    </StackPanel>
+                </ui:CardExpander>
+
+                <!-- 自动化 -->
+                <ui:CardExpander Header="自动化" IsExpanded="False" Margin="0,0,0,12">
+                    <StackPanel Margin="8,0,0,0">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="80"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+
+                            <TextBlock Grid.Row="0" Grid.Column="0" Text="检查间隔（分钟）" VerticalAlignment="Center"/>
+                            <TextBox Grid.Row="0" Grid.Column="1" Text="{Binding CheckIntervalMinutes}" 
+                                     HorizontalContentAlignment="Right" MinWidth="60"/>
+
+                            <TextBlock Grid.Row="1" Grid.Column="0" Text="保留备份数量" VerticalAlignment="Center" Margin="0,12,0,0"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding BackupCount}" 
+                                     HorizontalContentAlignment="Right" MinWidth="60" Margin="0,12,0,0"/>
+
+                            <CheckBox Grid.Row="2" Grid.Column="0" Content="开机自启" 
+                                     IsChecked="{Binding StartWithWindows}" VerticalAlignment="Center" Margin="0,12,0,0"/>
+
+                            <CheckBox Grid.Row="3" Grid.Column="0" Content="静默启动（不弹窗）" 
+                                     IsChecked="{Binding SilentStartup}" VerticalAlignment="Center" Margin="0,12,0,0"
+                                     IsEnabled="{Binding StartWithWindows}"/>
+                        </Grid>
+                    </StackPanel>
+                </ui:CardExpander>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <ui:Button Content="取消" Appearance="Secondary" MinWidth="80" Margin="0,0,8,0" Click="OnCancelClick"/>
+            <ui:Button Content="保存" Appearance="Primary" MinWidth="80" Click="OnSaveClick"/>
+        </StackPanel>
+    </Grid>
+</ui:FluentWindow>

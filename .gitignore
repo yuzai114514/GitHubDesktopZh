@@ -1,0 +1,12 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.cache
+artifacts/
+publish/
+resources/patches/
+githubdesktopzh.json
+*.json
+!resources/index.json

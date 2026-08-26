@@ -1,0 +1,8 @@
+{
+  "version": "3.6.4",
+  "files": [
+    "app/main.js",
+    "app/renderer.js"
+  ],
+  "allowlist": ["main.js", "renderer.js"]
+}
